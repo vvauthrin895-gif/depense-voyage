@@ -1,6 +1,6 @@
 # API Voyage — Heure & Dépenses ✈️
 
-Petite API Express pour un voyage : **heure de Casablanca + France** en direct et **enregistreur de dépenses** (devise au choix, catégories, modification protégée par code). L'accès est protégé par un **login / mot de passe**, et les dépenses peuvent être **exportées en CSV**.
+Petite API Express pour un voyage : **heure de Casablanca + France** en direct et **enregistreur de dépenses** (devise au choix, catégories, modification protégée par code). L'accès est protégé par un **login / mot de passe**, avec **gestion des utilisateurs** (page admin) et **export CSV** des dépenses.
 
 ## Démarrage
 
@@ -15,12 +15,28 @@ Serveur sur `http://localhost:3000` (variable `PORT` pour changer). Les dépense
 
 L'application entière (page + API dépenses) est protégée : sans session, `GET /` affiche la page de connexion et les routes `/api/expenses*` renvoient `401`.
 
-Identifiants par défaut : **`admin` / `voyage2026`** — à changer via variables d'environnement :
+### Comptes
+
+| Compte                    | Rôle        | Description                                       |
+| ------------------------- | ----------- | ------------------------------------------------- |
+| **`Victor` / `2580`**     | `admin`     | Créé automatiquement au démarrage. **Seul un admin peut gérer les utilisateurs** (page `👥 Utilisateurs`). |
+| `AUTH_USER` / `AUTH_PASS` | `user`      | Compte de repli (si les variables d'env sont définies, il est importé au 1er démarrage) |
+| `admin` / `voyage2026`    | `user`      | Défauts de `AUTH_USER` / `AUTH_PASS` si non définis |
 
 | Variable    | Défaut      | Description                       |
 | ----------- | ----------- | --------------------------------- |
-| `AUTH_USER` | `admin`     | Nom d'utilisateur                 |
-| `AUTH_PASS` | `voyage2026`| Mot de passe                      |
+| `AUTH_USER` | `admin`     | Nom d'utilisateur (compte de repli)|
+| `AUTH_PASS` | `voyage2026`| Mot de passe du compte de repli    |
+
+### Gestion des utilisateurs 👥
+
+L'administrateur (Victor) voit le bouton **👥 Utilisateurs** sur la page principale → `GET /admin`. Il peut :
+
+- **Ajouter** un utilisateur (nom, mot de passe ≥ 4 caractères, rôle `user` ou `admin`) ;
+- **Changer le mot de passe** ou **promouvoir / rétrograder** un utilisateur ;
+- **Supprimer** un compte.
+
+Les utilisateurs sont stockés dans `data/users.json` (mots de passe **hachés** SHA-256 + sel, fichier ignoré par git). Garde-fous : impossible de supprimer son propre compte ni de retirer le rôle admin du **dernier** administrateur.
 
 La session (cookie `HttpOnly`, `SameSite=Lax`) dure **7 jours**. Les sessions sont stockées en mémoire (perdues au redémarrage — il faudra se reconnecter).
 
@@ -33,10 +49,15 @@ La session (cookie `HttpOnly`, `SameSite=Lax`) dure **7 jours**. Les sessions so
 | Méthode | Route                        | Description                                       |
 | ------- | ---------------------------- | ------------------------------------------------- |
 | `GET`   | `/`                          | Page principale (ou page de connexion si non connecté) |
+| `GET`   | `/admin`                     | Page de gestion des utilisateurs (admin uniquement) |
 | `GET`   | `/dollar.avif`               | Image de fond (dollar)                            |
 | `POST`  | `/api/login`                 | Connexion (`{ username, password }`) → cookie session |
 | `POST`  | `/api/logout`                | Déconnexion (supprime la session)                 |
-| `GET`   | `/api/auth/status`           | État de la session (`{ authenticated, username }`)| 
+| `GET`   | `/api/auth/status`           | État de la session (`{ authenticated, username, role }`) |
+| `GET`   | `/api/users`                 | Lister les utilisateurs (admin)                   |
+| `POST`  | `/api/users`                 | Créer un utilisateur (admin)                      |
+| `PUT`   | `/api/users/:username`       | Changer mot de passe / rôle (admin)               |
+| `DELETE`| `/api/users/:username`       | Supprimer un utilisateur (admin)                  |
 | `GET`   | `/api/time`                  | Heures Casablanca + France (JSON)                 |
 | `GET`   | `/api/expenses`              | Lister les dépenses (tri par date décroissante)   |
 | `POST`  | `/api/expenses`              | Créer une dépense                                 |
@@ -44,7 +65,7 @@ La session (cookie `HttpOnly`, `SameSite=Lax`) dure **7 jours**. Les sessions so
 | `GET`   | `/api/expenses/export.csv`   | **Toutes** les dépenses en CSV (téléchargement)   |
 | `GET`   | `/health`                    | Healthcheck                                       |
 
-> Routes `⚠️ /api/expenses*` : authentification requise (sinon `401`).
+> Routes `⚠️ /api/expenses*` et `⚠️ /api/users*` : authentification requise ; `/api/users*` et `/admin` sont réservés à l'**administrateur** (sinon `401`/`403`).
 
 ### Exemple — se connecter
 

@@ -10,13 +10,27 @@ let baseUrl;
 let dataDir;
 let cookie = '';
 const port = 3210;
-const ADMIN = { username: 'admin', password: 'voyage2026' };
+const ADMIN = { username: 'admin', password: 'voyage2026' }; // compte de repli (AUTH_USER/AUTH_PASS)
 
-// fetch avec le cookie de session (authentifié)
-async function apiFetch(route, options = {}) {
+// fetch avec un cookie de session (authentifié)
+async function apiFetch(route, options = {}, useCookie = cookie) {
   const headers = { ...(options.headers || {}) };
-  if (cookie) headers.Cookie = cookie;
+  if (useCookie) headers.Cookie = useCookie;
   return fetch(baseUrl + route, { ...options, headers });
+}
+
+async function loginAs(username, password) {
+  const res = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const setCookie = res.headers.get('set-cookie');
+  return {
+    status: res.status,
+    body: await res.json().catch(() => ({})),
+    cookie: setCookie ? setCookie.split(';')[0] : '',
+  };
 }
 
 before(async () => {
@@ -41,14 +55,10 @@ before(async () => {
   }
   if (!up) throw new Error("Le serveur n'a pas démarré");
 
-  // connexion admin pour les tests authentifiés
-  const login = await fetch(`${baseUrl}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(ADMIN),
-  });
-  if (!login.ok) throw new Error('Login de test échoué');
-  cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+  // connexion du compte de repli pour les tests authentifiés
+  const login = await loginAs(ADMIN.username, ADMIN.password);
+  if (login.status !== 200) throw new Error('Login de test échoué');
+  cookie = login.cookie;
 });
 
 after(async () => {
@@ -77,12 +87,8 @@ test('sans authentification : page de connexion + API refusée', async () => {
 });
 
 test('login avec de mauvais identifiants → 401', async () => {
-  const res = await fetch(`${baseUrl}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'mauvais' }),
-  });
-  assert.equal(res.status, 401);
+  const { status } = await loginAs('admin', 'mauvais');
+  assert.equal(status, 401);
 });
 
 test("GET / authentifié renvoie la page avec l'heure Casablanca + France et le bouton CSV", async () => {
@@ -96,6 +102,147 @@ test("GET / authentifié renvoie la page avec l'heure Casablanca + France et le 
   assert.match(html, /Dépenses du voyage/);
   assert.match(html, /Exporter CSV/);
   assert.match(html, /btn-logout/);
+  assert.doesNotMatch(html, /href="\/admin"/); // le compte de repli n'est pas admin
+});
+
+test('Victor / 2580 se connecte en tant qu\'administrateur', async () => {
+  const { status, body, cookie: victorCookie } = await loginAs('Victor', '2580');
+  assert.equal(status, 200);
+  assert.equal(body.role, 'admin');
+
+  // la page principale lui affiche le lien vers la gestion des utilisateurs
+  const page = await apiFetch('/', {}, victorCookie);
+  const html = await page.text();
+  assert.match(html, /href="\/admin"/);
+  assert.match(html, /👥 Utilisateurs/);
+});
+
+test('un utilisateur simple ne peut pas gérer les utilisateurs', async () => {
+  const res = await apiFetch('/api/users');
+  assert.equal(res.status, 403);
+});
+
+test("l'administrateur crée, liste et protège contre les doublons", async () => {
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+
+  const created = await apiFetch(
+    '/api/users',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'Marie', password: 'secret1', role: 'user' }),
+    },
+    victorCookie
+  );
+  assert.equal(created.status, 201);
+
+  const dup = await apiFetch(
+    '/api/users',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'Marie', password: 'secret1' }),
+    },
+    victorCookie
+  );
+  assert.equal(dup.status, 409);
+
+  const list = await apiFetch('/api/users', {}, victorCookie);
+  const users = await list.json();
+  assert.ok(users.some((u) => u.username === 'Victor' && u.role === 'admin'));
+  assert.ok(users.some((u) => u.username === 'Marie' && u.role === 'user'));
+  assert.ok(users.every((u) => u.passwordHash === undefined && u.salt === undefined));
+});
+
+test("l'administrateur change le mot de passe d'un utilisateur", async () => {
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+
+  const res = await apiFetch(
+    '/api/users/Marie',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'abcd' }),
+    },
+    victorCookie
+  );
+  assert.equal(res.status, 200);
+
+  const login = await loginAs('Marie', 'abcd');
+  assert.equal(login.status, 200);
+  assert.equal(login.body.role, 'user');
+});
+
+test('garde-fous : dernier admin et auto-suppression', async () => {
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+
+  // retirer le rôle admin du dernier administrateur → refusé
+  const demote = await apiFetch(
+    '/api/users/Victor',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'user' }),
+    },
+    victorCookie
+  );
+  assert.equal(demote.status, 400);
+
+  // se supprimer soi-même → refusé
+  const self = await apiFetch('/api/users/Victor', { method: 'DELETE' }, victorCookie);
+  assert.equal(self.status, 400);
+
+  // supprimer un autre utilisateur → OK
+  const del = await apiFetch('/api/users/Marie', { method: 'DELETE' }, victorCookie);
+  assert.equal(del.status, 200);
+  const list = await apiFetch('/api/users', {}, victorCookie);
+  const users = await list.json();
+  assert.ok(!users.some((u) => u.username === 'Marie'));
+});
+
+test("l'administrateur peut promouvoir un utilisateur", async () => {
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+
+  await apiFetch(
+    '/api/users',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'Marie', password: 'secret1' }),
+    },
+    victorCookie
+  );
+
+  const res = await apiFetch(
+    '/api/users/Marie',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'admin' }),
+    },
+    victorCookie
+  );
+  assert.equal(res.status, 200);
+
+  const login = await loginAs('Marie', 'secret1');
+  assert.equal(login.status, 200);
+  assert.equal(login.body.role, 'admin');
+});
+
+test('page /admin : réservée à l\'administrateur', async () => {
+  // Victor → 200
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+  const adminPage = await apiFetch('/admin', {}, victorCookie);
+  assert.equal(adminPage.status, 200);
+  assert.match(await adminPage.text(), /Gestion des utilisateurs/);
+
+  // utilisateur simple → redirection
+  const userPage = await apiFetch('/admin', { redirect: 'manual' }, cookie);
+  assert.equal(userPage.status, 302);
+
+  // non connecté → redirection
+  const anon = await fetch(baseUrl + '/admin', { redirect: 'manual' });
+  assert.equal(anon.status, 302);
 });
 
 test('GET /api/time renvoie l\'heure de Casablanca et de France', async () => {

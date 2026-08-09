@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as store from './src/store.js';
+import * as users from './src/users.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,7 +18,7 @@ const EDIT_CODE = '1111';
 const AUTH_USER = process.env.AUTH_USER || 'admin';
 const AUTH_PASS = process.env.AUTH_PASS || 'voyage2026';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 jours
-const sessions = new Map(); // token -> { username, expiresAt }
+const sessions = new Map(); // token -> { username, role, expiresAt }
 
 function getCookie(req, name) {
   const header = req.headers.cookie;
@@ -42,6 +43,7 @@ function isAuthenticated(req) {
     return false;
   }
   req.sessionUser = session.username;
+  req.sessionRole = session.role;
   return true;
 }
 
@@ -50,20 +52,38 @@ function requireAuth(req, res, next) {
   return res.status(401).json({ error: 'Authentification requise' });
 }
 
+function requireAdmin(req, res, next) {
+  if (isAuthenticated(req) && req.sessionRole === 'admin') return next();
+  return res.status(403).json({ error: "Accès réservé à l'administrateur" });
+}
+
 function safeEqual(a, b) {
   const ha = crypto.createHash('sha256').update(String(a)).digest();
   const hb = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(ha, hb);
 }
 
-function createSession(username) {
+function createSession(username, role) {
   const now = Date.now();
   for (const [key, s] of sessions) {
     if (s.expiresAt < now) sessions.delete(key);
   }
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { username, expiresAt: now + SESSION_TTL_MS });
+  sessions.set(token, { username, role, expiresAt: now + SESSION_TTL_MS });
   return token;
+}
+
+// Vérifie les identifiants : d'abord dans le fichier utilisateurs (géré via
+// la page admin), puis en repli le compte AUTH_USER/AUTH_PASS s'il n'est pas
+// encore géré dans le fichier.
+async function authenticate(username, password) {
+  const stored = await users.verify(username, password);
+  if (stored) return stored;
+  if (safeEqual(username, AUTH_USER) && safeEqual(password, AUTH_PASS)) {
+    const existing = await users.getByUsername(username);
+    if (!existing) return { username, role: 'user' };
+  }
+  return null;
 }
 
 function setSessionCookie(res, token, maxAgeSeconds = SESSION_TTL_MS / 1000) {
@@ -103,7 +123,7 @@ function dateIn(zone, now) {
 }
 
 // — Page principale ---------------------------------------------------------
-function mainPageHtml() {
+function mainPageHtml(isAdmin) {
   return `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -162,6 +182,12 @@ function mainPageHtml() {
     #btn-logout:hover { background: #fecaca; }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
     .topbar h1 { margin: 0; }
+    .topbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .admin-link {
+      text-decoration: none; background: #eef2ff; color: #4338ca;
+      border-radius: 10px; padding: 8px 12px; font-size: 0.85rem; font-weight: 600;
+    }
+    .admin-link:hover { background: #e0e7ff; }
     .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     form {
       background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 14px;
@@ -197,7 +223,10 @@ function mainPageHtml() {
   <main>
     <div class="topbar">
       <h1>✈️ Mon voyage</h1>
-      <button id="btn-logout">Déconnexion</button>
+      <div class="topbar-actions">
+        ${isAdmin ? '<a class="admin-link" href="/admin">👥 Utilisateurs</a>' : ''}
+        <button id="btn-logout">Déconnexion</button>
+      </div>
     </div>
 
     <section class="clock">
@@ -460,11 +489,219 @@ function loginPageHtml() {
 </html>`;
 }
 
+function adminPageHtml() {
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Utilisateurs — Voyage</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: linear-gradient(135deg, #d9f2e3 0%, #b7e6c9 100%);
+      color: #14532d;
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 24px 16px;
+    }
+    main {
+      max-width: 640px; margin: 0 auto;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 20px; padding: 28px;
+      box-shadow: 0 10px 30px rgba(20, 83, 45, 0.15);
+    }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+    h1 { font-size: 1.3rem; }
+    button {
+      border: none; border-radius: 10px; padding: 10px 14px;
+      font-size: 0.9rem; cursor: pointer; font-weight: 600;
+    }
+    #btn-back {
+      background: #e5e7eb; color: #374151; text-decoration: none; display: inline-block;
+    }
+    #btn-back:hover { background: #d1d5db; }
+    form#add-user {
+      background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 14px;
+      padding: 16px; display: grid; gap: 10px; margin-bottom: 20px;
+    }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 130px; }
+    .field label { font-size: 0.8rem; opacity: 0.8; }
+    input, select {
+      padding: 9px 10px; border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 0.95rem; font-family: inherit;
+    }
+    form#add-user button[type="submit"] { background: #16a34a; color: #fff; }
+    ul { list-style: none; display: grid; gap: 8px; }
+    li {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
+      padding: 10px 12px; font-size: 0.92rem; flex-wrap: wrap;
+    }
+    .badge { font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+    .badge.admin { background: #dcfce7; color: #166534; }
+    .badge.user { background: #e0e7ff; color: #3730a3; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .actions button { padding: 6px 10px; font-size: 0.8rem; }
+    .btn-role { background: #eef2ff; color: #4338ca; }
+    .btn-pass { background: #fffbeb; color: #b45309; }
+    .btn-del { background: #fee2e2; color: #b91c1c; }
+    .msg { margin-top: 12px; font-size: 0.9rem; font-weight: 600; }
+    .msg.error { color: #b91c1c; }
+    .msg.ok { color: #166534; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <h1>👥 Gestion des utilisateurs</h1>
+      <a id="btn-back" href="/">← Retour</a>
+    </div>
+
+    <form id="add-user">
+      <div class="row">
+        <div class="field">
+          <label for="u-name">Nom d'utilisateur</label>
+          <input id="u-name" type="text" required placeholder="Ex. Marie">
+        </div>
+        <div class="field">
+          <label for="u-pass">Mot de passe</label>
+          <input id="u-pass" type="password" required minlength="4" placeholder="Min. 4 caractères">
+        </div>
+        <div class="field">
+          <label for="u-role">Rôle</label>
+          <select id="u-role">
+            <option value="user">Utilisateur</option>
+            <option value="admin">Administrateur</option>
+          </select>
+        </div>
+      </div>
+      <button type="submit">＋ Ajouter l'utilisateur</button>
+    </form>
+
+    <p id="msg" class="msg hidden"></p>
+    <ul id="users-list"></ul>
+    <p id="empty">Aucun utilisateur.</p>
+  </main>
+  <script>
+    const listEl = document.getElementById('users-list');
+    const emptyEl = document.getElementById('empty');
+    const msgEl = document.getElementById('msg');
+    const form = document.getElementById('add-user');
+
+    function showMsg(text, ok) {
+      msgEl.textContent = text;
+      msgEl.classList.remove('hidden', 'error', 'ok');
+      msgEl.classList.add(ok ? 'ok' : 'error');
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    async function loadUsers() {
+      const res = await fetch('/api/users');
+      if (!res.ok) {
+        showMsg('Erreur : ' + ((await res.json().catch(() => ({}))).error || res.status));
+        return;
+      }
+      const users = await res.json();
+      emptyEl.style.display = users.length ? 'none' : 'block';
+      listEl.innerHTML = '';
+      for (const u of users) {
+        const li = document.createElement('li');
+        li.innerHTML =
+          '<span><strong>' + escapeHtml(u.username) + '</strong> ' +
+          '<span class="badge ' + (u.role === 'admin' ? 'admin' : 'user') + '">' +
+          (u.role === 'admin' ? 'Admin' : 'Utilisateur') + '</span></span>' +
+          '<span class="actions">' +
+          '<button class="btn-pass" data-user="' + escapeHtml(u.username) + '">🔑 Mot de passe</button>' +
+          '<button class="btn-role" data-user="' + escapeHtml(u.username) + '" data-role="' + u.role + '">' +
+          (u.role === 'admin' ? 'Retirer admin' : 'Passer admin') + '</button>' +
+          '<button class="btn-del" data-user="' + escapeHtml(u.username) + '">🗑 Supprimer</button>' +
+          '</span>';
+        listEl.appendChild(li);
+      }
+      listEl.querySelectorAll('button').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const username = btn.dataset.user;
+          const url = '/api/users/' + encodeURIComponent(username);
+          if (btn.classList.contains('btn-pass')) {
+            const pass = prompt('Nouveau mot de passe pour ' + username + ' (min. 4 caractères) :');
+            if (!pass || pass.length < 4) return;
+            const res = await fetch(url, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: pass }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (res.ok) showMsg('Mot de passe modifié ✅', true);
+            else showMsg('Erreur : ' + (body.error || (body.errors || []).join(', ') || 'inconnue'));
+          } else if (btn.classList.contains('btn-role')) {
+            const newRole = btn.dataset.role === 'admin' ? 'user' : 'admin';
+            const res = await fetch(url, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ role: newRole }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (res.ok) { showMsg('Rôle modifié ✅', true); await loadUsers(); }
+            else showMsg('Erreur : ' + (body.error || 'inconnue'));
+          } else if (btn.classList.contains('btn-del')) {
+            if (!confirm('Supprimer le compte ' + username + ' ?')) return;
+            const res = await fetch(url, { method: 'DELETE' });
+            const body = await res.json().catch(() => ({}));
+            if (res.ok) { showMsg('Compte supprimé ✅', true); await loadUsers(); }
+            else showMsg('Erreur : ' + (body.error || 'inconnue'));
+          }
+        });
+      });
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('u-name').value.trim(),
+          password: document.getElementById('u-pass').value,
+          role: document.getElementById('u-role').value,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        showMsg('Utilisateur créé ✅', true);
+        form.reset();
+        await loadUsers();
+      } else {
+        showMsg('Erreur : ' + (body.error || (body.errors || []).join(', ') || 'inconnue'));
+      }
+    });
+
+    loadUsers();
+  </script>
+</body>
+</html>`;
+}
+
 app.get('/', (req, res) => {
   if (!isAuthenticated(req)) {
     return res.type('html').send(loginPageHtml());
   }
-  res.type('html').send(mainPageHtml());
+  res.type('html').send(mainPageHtml(req.sessionRole === 'admin'));
+});
+
+// — Page d'administration des utilisateurs ----------------------------------
+app.get('/admin', (req, res) => {
+  if (!isAuthenticated(req) || req.sessionRole !== 'admin') {
+    return res.redirect('/');
+  }
+  res.type('html').send(adminPageHtml());
 });
 
 // — API heure ---------------------------------------------------------------
@@ -482,14 +719,22 @@ app.get('/health', (req, res) => {
 });
 
 // — API authentification -----------------------------------------------------
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body ?? {};
-  if (!safeEqual(username, AUTH_USER) || !safeEqual(password, AUTH_PASS)) {
-    return res.status(401).json({ error: 'Identifiants incorrects' });
+app.post('/api/login', async (req, res, next) => {
+  try {
+    const { username, password } = req.body ?? {};
+    if (typeof username !== 'string' || typeof password !== 'string') {
+      return res.status(401).json({ error: 'Identifiants incorrects' });
+    }
+    const account = await authenticate(username, password);
+    if (!account) {
+      return res.status(401).json({ error: 'Identifiants incorrects' });
+    }
+    const token = createSession(account.username, account.role);
+    setSessionCookie(res, token);
+    res.json({ username: account.username, role: account.role });
+  } catch (err) {
+    next(err);
   }
-  const token = createSession(AUTH_USER);
-  setSessionCookie(res, token);
-  res.json({ username: AUTH_USER });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -501,7 +746,107 @@ app.post('/api/logout', (req, res) => {
 
 app.get('/api/auth/status', (req, res) => {
   const authenticated = isAuthenticated(req);
-  res.json({ authenticated, username: authenticated ? req.sessionUser : null });
+  res.json({
+    authenticated,
+    username: authenticated ? req.sessionUser : null,
+    role: authenticated ? req.sessionRole : null,
+  });
+});
+
+// — API utilisateurs (réservée à l'administrateur) --------------------------
+app.get('/api/users', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    res.json(await users.list());
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/users', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { username, password, role } = req.body ?? {};
+    const errors = [];
+    if (typeof username !== 'string' || !username.trim()) {
+      errors.push('username : chaîne non vide requise');
+    }
+    if (typeof password !== 'string' || password.length < 4) {
+      errors.push('password : au moins 4 caractères requis');
+    }
+    const userRole = role === undefined ? 'user' : role;
+    if (!['user', 'admin'].includes(userRole)) {
+      errors.push('role : user ou admin requis');
+    }
+    if (errors.length > 0) {
+      return res.status(400).json({ errors });
+    }
+    const created = await users.create(username.trim(), password, userRole);
+    res.status(201).json(created);
+  } catch (err) {
+    if (err.code === 'DUPLICATE') {
+      return res.status(409).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
+// Modifier le mot de passe et/ou le rôle d'un utilisateur
+app.put('/api/users/:username', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { password, role } = req.body ?? {};
+    const errors = [];
+    if (password !== undefined && (typeof password !== 'string' || password.length < 4)) {
+      errors.push('password : au moins 4 caractères requis');
+    }
+    if (role !== undefined && !['user', 'admin'].includes(role)) {
+      errors.push('role : user ou admin requis');
+    }
+    if (password === undefined && role === undefined) {
+      errors.push('password ou role requis');
+    }
+    if (errors.length > 0) {
+      return res.status(400).json({ errors });
+    }
+
+    const target = await users.getByUsername(req.params.username);
+    if (!target) {
+      return res.status(404).json({ error: 'Utilisateur introuvable' });
+    }
+
+    // Garde-fou : ne jamais retirer le rôle admin du dernier administrateur
+    if (role === 'user' && target.role === 'admin') {
+      const admins = (await users.list()).filter((u) => u.role === 'admin');
+      if (admins.length <= 1) {
+        return res.status(400).json({ error: "Impossible de retirer le rôle admin du dernier administrateur" });
+      }
+    }
+
+    const updated = await users.update(req.params.username, { password, role });
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/users/:username', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (req.params.username === req.sessionUser) {
+      return res.status(400).json({ error: 'Impossible de supprimer votre propre compte' });
+    }
+    const target = await users.getByUsername(req.params.username);
+    if (!target) {
+      return res.status(404).json({ error: 'Utilisateur introuvable' });
+    }
+    if (target.role === 'admin') {
+      const admins = (await users.list()).filter((u) => u.role === 'admin');
+      if (admins.length <= 1) {
+        return res.status(400).json({ error: 'Impossible de supprimer le dernier administrateur' });
+      }
+    }
+    await users.remove(req.params.username);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // — API dépenses ------------------------------------------------------------
@@ -637,6 +982,9 @@ app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Erreur interne du serveur' });
 });
+
+// S'assure que le compte admin Victor (et l'éventuel compte AUTH_USER) existe
+await users.ensureSeeded();
 
 // Pattern officiel Vercel : app.listen (port listener)
 app.listen(PORT, () => {
