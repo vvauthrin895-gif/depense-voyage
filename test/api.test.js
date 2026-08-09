@@ -100,6 +100,17 @@ test('PUT et DELETE fonctionnent', async () => {
   assert.equal(getRes.status, 404);
 });
 
+test('GET /api/time renvoie la date et l\'heure courantes', async () => {
+  const res = await fetch(`${baseUrl}/api/time`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.match(body.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(body.time, /^\d{2}:\d{2}:\d{2}$/);
+  assert.ok(body.iso);
+  assert.ok(body.timezone);
+  assert.ok(new Date(body.iso).getTime() > 0);
+});
+
 test('routes inconnues → 404 et JSON invalide → 400', async () => {
   const notFound = await fetch(`${baseUrl}/api/inconnu`);
   assert.equal(notFound.status, 404);

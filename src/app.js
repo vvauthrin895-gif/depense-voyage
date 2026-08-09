@@ -9,6 +9,16 @@ export function createApp() {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
+  app.get('/api/time', (req, res) => {
+    const now = new Date();
+    res.json({
+      date: now.toISOString().slice(0, 10),
+      time: now.toTimeString().slice(0, 8),
+      iso: now.toISOString(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    });
+  });
+
   app.get('/', (req, res) => {
     res.type('html').send(`<!DOCTYPE html>
 <html lang="fr">
@@ -35,6 +45,7 @@ export function createApp() {
     <tr><td>GET</td><td><code>/api/expenses</code></td><td>Lister les dépenses</td></tr>
     <tr><td>GET</td><td><code>/api/expenses?month=YYYY-MM</code></td><td>Dépenses d'un mois</td></tr>
     <tr><td>GET</td><td><code>/api/summary?month=YYYY-MM</code></td><td>Résumé du mois</td></tr>
+    <tr><td>GET</td><td><code>/api/time</code></td><td>Heure courante</td></tr>
     <tr><td>GET</td><td><code>/health</code></td><td>Healthcheck</td></tr>
   </table>
   <p><a href="/api/expenses">Voir la liste des dépenses →</a></p>

@@ -24,7 +24,23 @@ Le serveur écoute sur `http://localhost:3000` (modifiable avec la variable `POR
 | `PUT`   | `/api/expenses/:id`            | Mettre à jour (partiel)                      |
 | `DELETE`| `/api/expenses/:id`            | Supprimer                                    |
 | `GET`   | `/api/summary?month=YYYY-MM`   | Total + total par catégorie du mois          |
+| `GET`   | `/api/time`                    | Date et heure courantes                       |
 | `GET`   | `/health`                      | Healthcheck                                  |
+
+### Exemple — heure courante
+
+```bash
+curl http://localhost:3000/api/time
+```
+
+```json
+{
+  "date": "2026-08-09",
+  "time": "14:32:05",
+  "iso": "2026-08-09T14:32:05.123Z",
+  "timezone": "Europe/Paris"
+}
+```
 
 ### Exemple — créer une dépense
 
