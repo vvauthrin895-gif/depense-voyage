@@ -93,10 +93,30 @@ curl "http://localhost:3000/api/summary?month=2026-08"
 npm test
 ```
 
-## Déploiement
+## Déploiement sur Vercel
 
-- **Vercel / plateformes serverless** : le stockage fichier local est éphémère. Pour un vrai déploiement, brancher une base (Postgres/SQLite managé) ou utiliser un serveur classique (Railway, Fly.io, VPS).
-- Le dossier `data/` est ignoré par git : chaque instance repart d'un fichier vide.
+Le projet est prêt pour Vercel : `api/index.js` exporte l'app Express et `vercel.json` redirige toutes les requêtes vers cette fonction serverless.
+
+```bash
+npm i -g vercel
+vercel
+```
+
+Ou connectez simplement le dépôt GitHub dans le dashboard Vercel.
+
+### ⚠️ Stockage
+
+Les fonctions serverless de Vercel ont un système de fichiers **en lecture seule** (sauf `/tmp`, éphémère) : un simple fichier JSON ne suffit donc pas.
+
+- **Sans configuration** : les données sont stockées dans `/tmp` → l'API fonctionne mais les données sont **perdues** à chaque redémarrage à froid / redéploiement.
+- **Recommandé — Vercel KV (Redis, persistant)** :
+  1. Dans le dashboard Vercel → **Storage** → créez un store **KV** (offre gratuite).
+  2. Copiez les variables `KV_REST_API_URL` et `KV_REST_API_TOKEN` dans **Project → Settings → Environment Variables** (environnement Production).
+  3. Redéployez. L'API bascule automatiquement sur le KV et les données persistent.
+
+L'endpoint `GET /health` renvoie le backend de stockage actif (`vercel-kv (persistant)` ou `/tmp (éphémère sur Vercel)`), utile pour vérifier le déploiement.
+
+> **Autres plateformes** (Railway, Fly.io, VPS) : le stockage fichier local (`data/`) fonctionne, mais reste éphémère sur redéploiement. Le dossier `data/` est ignoré par git.
 
 ## Licence
 

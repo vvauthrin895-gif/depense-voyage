@@ -4,14 +4,70 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// — Stockage -----------------------------------------------------------------
+// 1. Vercel KV (Redis managé) si KV_REST_API_URL et KV_REST_API_TOKEN sont
+//    définis → persistant, recommandé sur Vercel.
+// 2. Sinon, fichier JSON local. Sur Vercel le système de fichiers est en
+//    lecture seule (sauf /tmp) : on écrit donc dans /tmp (éphémère).
+// 3. En local : data/expenses.json (ou DATA_DIR si défini).
+
+const KV_KEY = 'expenses:data';
+
+function kvConfig() {
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
+  return url && token ? { url, token } : null;
+}
+
+function isVercel() {
+  return process.env.VERCEL === '1' || process.env.VERCEL_ENV !== undefined;
+}
+
 function dataFile() {
   const dir = process.env.DATA_DIR
     ? path.resolve(process.env.DATA_DIR)
-    : path.join(__dirname, '..', 'data');
+    : isVercel()
+      ? '/tmp/depenses-api'
+      : path.join(__dirname, '..', 'data');
   return path.join(dir, 'expenses.json');
 }
 
+export function storageBackend() {
+  if (kvConfig()) return 'vercel-kv (persistant)';
+  if (process.env.DATA_DIR) return 'fichier (DATA_DIR)';
+  if (isVercel()) return '/tmp (éphémère sur Vercel)';
+  return 'fichier local (data/)';
+}
+
+async function kvGet() {
+  const { url, token } = kvConfig();
+  const res = await fetch(`${url}/json/get/${KV_KEY}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Erreur KV (get) : ${res.status}`);
+  const { result } = await res.json();
+  return result ?? null;
+}
+
+async function kvSet(data) {
+  const { url, token } = kvConfig();
+  const res = await fetch(`${url}/json/set/${KV_KEY}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`Erreur KV (set) : ${res.status}`);
+}
+
 async function load() {
+  if (kvConfig()) {
+    const data = await kvGet();
+    if (data === null) return { expenses: [] };
+    if (!Array.isArray(data.expenses)) {
+      throw new Error('Format des données KV invalide');
+    }
+    return data;
+  }
   try {
     const raw = await readFile(dataFile(), 'utf8');
     const parsed = JSON.parse(raw);
@@ -28,6 +84,10 @@ async function load() {
 }
 
 async function save(data) {
+  if (kvConfig()) {
+    await kvSet(data);
+    return;
+  }
   const file = dataFile();
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, JSON.stringify(data, null, 2), 'utf8');

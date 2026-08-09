@@ -1,12 +1,13 @@
 import express from 'express';
 import { router as expensesRouter, summaryRouter } from './routes/expenses.js';
+import { storageBackend } from './store.js';
 
 export function createApp() {
   const app = express();
   app.use(express.json());
 
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    res.json({ status: 'ok', time: new Date().toISOString(), storage: storageBackend() });
   });
 
   app.get('/api/time', (req, res) => {
