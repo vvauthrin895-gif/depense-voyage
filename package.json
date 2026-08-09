@@ -1,7 +1,7 @@
 {
-  "name": "api-depenses",
+  "name": "api-heure-casablanca",
   "version": "1.0.0",
-  "description": "API pour enregistrer et suivre des dépenses mensuelles",
+  "description": "API qui affiche l'heure à Casablanca sur une page verte",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -12,14 +12,5 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": [
-    "api",
-    "expenses",
-    "budget",
-    "depenses"
-  ],
-  "license": "MIT",
-  "dependencies": {
-    "express": "^4.21.2"
-  }
+  "license": "MIT"
 }
