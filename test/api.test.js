@@ -8,7 +8,16 @@ import path from 'node:path';
 let server;
 let baseUrl;
 let dataDir;
+let cookie = '';
 const port = 3210;
+const ADMIN = { username: 'admin', password: 'voyage2026' };
+
+// fetch avec le cookie de session (authentifié)
+async function apiFetch(route, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (cookie) headers.Cookie = cookie;
+  return fetch(baseUrl + route, { ...options, headers });
+}
 
 before(async () => {
   dataDir = await mkdtemp(path.join(os.tmpdir(), 'voyage-api-'));
@@ -18,15 +27,28 @@ before(async () => {
   });
   baseUrl = `http://127.0.0.1:${port}`;
   // attend que le serveur réponde
+  let up = false;
   for (let i = 0; i < 50; i++) {
     try {
       const res = await fetch(`${baseUrl}/health`);
-      if (res.ok) return;
+      if (res.ok) {
+        up = true;
+        break;
+      }
     } catch {
       await new Promise((r) => setTimeout(r, 100));
     }
   }
-  throw new Error("Le serveur n'a pas démarré");
+  if (!up) throw new Error("Le serveur n'a pas démarré");
+
+  // connexion admin pour les tests authentifiés
+  const login = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ADMIN),
+  });
+  if (!login.ok) throw new Error('Login de test échoué');
+  cookie = (login.headers.get('set-cookie') || '').split(';')[0];
 });
 
 after(async () => {
@@ -35,7 +57,7 @@ after(async () => {
 });
 
 async function postExpense(body) {
-  const res = await fetch(`${baseUrl}/api/expenses`, {
+  const res = await apiFetch('/api/expenses', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -43,8 +65,28 @@ async function postExpense(body) {
   return { status: res.status, body: await res.json() };
 }
 
-test("GET / renvoie la page avec l'heure Casablanca + France et un fond vert pâle", async () => {
-  const res = await fetch(baseUrl + '/');
+test('sans authentification : page de connexion + API refusée', async () => {
+  const page = await fetch(baseUrl + '/');
+  const html = await page.text();
+  assert.equal(page.status, 200);
+  assert.match(html, /Se connecter/);
+  assert.doesNotMatch(html, /Dépenses du voyage/);
+
+  const res = await fetch(`${baseUrl}/api/expenses`);
+  assert.equal(res.status, 401);
+});
+
+test('login avec de mauvais identifiants → 401', async () => {
+  const res = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'mauvais' }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test("GET / authentifié renvoie la page avec l'heure Casablanca + France et le bouton CSV", async () => {
+  const res = await apiFetch('/');
   assert.equal(res.status, 200);
   const html = await res.text();
   assert.match(html, /background: linear-gradient\(135deg, #d9f2e3/);
@@ -52,6 +94,8 @@ test("GET / renvoie la page avec l'heure Casablanca + France et un fond vert pâ
   assert.match(html, /France/);
   assert.match(html, /dollar\.avif/);
   assert.match(html, /Dépenses du voyage/);
+  assert.match(html, /Exporter CSV/);
+  assert.match(html, /btn-logout/);
 });
 
 test('GET /api/time renvoie l\'heure de Casablanca et de France', async () => {
@@ -77,7 +121,7 @@ test('POST crée une dépense avec devise puis GET la retourne', async () => {
   assert.ok(body.id);
   assert.equal(body.currency, 'MAD');
 
-  const res = await fetch(`${baseUrl}/api/expenses`);
+  const res = await apiFetch('/api/expenses');
   const list = await res.json();
   assert.equal(list.length, 1);
   assert.equal(list[0].name, 'Resto');
@@ -99,7 +143,7 @@ test('PUT modifie le nom uniquement avec le code 1111', async () => {
   });
 
   // mauvais code → 403
-  const bad = await fetch(`${baseUrl}/api/expenses/${created.id}`, {
+  const bad = await apiFetch(`/api/expenses/${created.id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: '0000', name: 'Hack' }),
@@ -107,7 +151,7 @@ test('PUT modifie le nom uniquement avec le code 1111', async () => {
   assert.equal(bad.status, 403);
 
   // bon code → nom modifié
-  const ok = await fetch(`${baseUrl}/api/expenses/${created.id}`, {
+  const ok = await apiFetch(`/api/expenses/${created.id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: '1111', name: 'Taxi aéroport' }),
@@ -116,6 +160,23 @@ test('PUT modifie le nom uniquement avec le code 1111', async () => {
   const updated = await ok.json();
   assert.equal(updated.name, 'Taxi aéroport');
   assert.equal(updated.amount, 100);
+});
+
+test('GET /api/expenses/export.csv renvoie toutes les données en CSV', async () => {
+  const res = await apiFetch('/api/expenses/export.csv');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /text\/csv/);
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert.deepEqual([...buf.subarray(0, 3)], [0xef, 0xbb, 0xbf]); // BOM UTF-8 pour Excel
+  const csv = buf.toString('utf8').replace(/^\uFEFF/, '');
+  assert.match(csv, /^id;name;amount;currency;date;category;createdAt;updatedAt/m);
+  assert.match(csv, /Resto;45\.5;MAD;2026-08-09;Alimentation/);
+  assert.match(csv, /Taxi aéroport;100;EUR;2026-08-09;Transport/);
+});
+
+test('CSV export sans authentification → 401', async () => {
+  const res = await fetch(`${baseUrl}/api/expenses/export.csv`);
+  assert.equal(res.status, 401);
 });
 
 test('route inconnue → 404', async () => {

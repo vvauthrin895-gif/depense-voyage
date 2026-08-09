@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as store from './src/store.js';
@@ -11,6 +12,67 @@ const TZ_FRANCE = 'Europe/Paris';
 const CURRENCIES = ['EUR', 'MAD', 'USD', 'GBP'];
 const CATEGORIES = ['Alimentation', 'Logement', 'Transport', 'Loisirs', 'Santé', 'Shopping', 'Autre'];
 const EDIT_CODE = '1111';
+
+// Authentification (login / mot de passe) — modifiable via variables d'env
+const AUTH_USER = process.env.AUTH_USER || 'admin';
+const AUTH_PASS = process.env.AUTH_PASS || 'voyage2026';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 jours
+const sessions = new Map(); // token -> { username, expiresAt }
+
+function getCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    }
+  }
+  return null;
+}
+
+function isAuthenticated(req) {
+  const token = getCookie(req, 'session');
+  if (!token) return false;
+  const session = sessions.get(token);
+  if (!session) return false;
+  if (session.expiresAt < Date.now()) {
+    sessions.delete(token);
+    return false;
+  }
+  req.sessionUser = session.username;
+  return true;
+}
+
+function requireAuth(req, res, next) {
+  if (isAuthenticated(req)) return next();
+  return res.status(401).json({ error: 'Authentification requise' });
+}
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function createSession(username) {
+  const now = Date.now();
+  for (const [key, s] of sessions) {
+    if (s.expiresAt < now) sessions.delete(key);
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { username, expiresAt: now + SESSION_TTL_MS });
+  return token;
+}
+
+function setSessionCookie(res, token, maxAgeSeconds = SESSION_TTL_MS / 1000) {
+  res.setHeader('Set-Cookie', `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`);
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', 'session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+}
 
 const app = express();
 app.use(express.json());
@@ -41,8 +103,8 @@ function dateIn(zone, now) {
 }
 
 // — Page principale ---------------------------------------------------------
-app.get('/', (req, res) => {
-  res.type('html').send(`<!DOCTYPE html>
+function mainPageHtml() {
+  return `<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="utf-8">
@@ -94,6 +156,13 @@ app.get('/', (req, res) => {
     }
     #btn-add { background: #16a34a; color: #fff; }
     #btn-add:hover { background: #15803d; }
+    #btn-export { background: #f59e0b; color: #fff; }
+    #btn-export:hover { background: #d97706; }
+    #btn-logout { background: #fee2e2; color: #b91c1c; }
+    #btn-logout:hover { background: #fecaca; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+    .topbar h1 { margin: 0; }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     form {
       background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 14px;
       padding: 16px; display: grid; gap: 10px; margin-bottom: 16px;
@@ -126,7 +195,10 @@ app.get('/', (req, res) => {
 <body>
   <div id="dollar-bg" class="hidden"></div>
   <main>
-    <h1>✈️ Mon voyage</h1>
+    <div class="topbar">
+      <h1>✈️ Mon voyage</h1>
+      <button id="btn-logout">Déconnexion</button>
+    </div>
 
     <section class="clock">
       <div class="zone">
@@ -143,7 +215,10 @@ app.get('/', (req, res) => {
     <section class="expenses">
       <div class="expenses-header">
         <h2>💰 Dépenses du voyage</h2>
-        <button id="btn-add">＋ Ajouter une dépense</button>
+        <div class="header-actions">
+          <button id="btn-export">⬇️ Exporter CSV</button>
+          <button id="btn-add">＋ Ajouter une dépense</button>
+        </div>
       </div>
 
       <form id="expense-form" class="hidden">
@@ -220,6 +295,17 @@ app.get('/', (req, res) => {
     document.getElementById('btn-add').addEventListener('click', openForm);
     document.getElementById('btn-cancel').addEventListener('click', closeForm);
 
+    // Export de toutes les données en CSV
+    document.getElementById('btn-export').addEventListener('click', () => {
+      window.location.href = '/api/expenses/export.csv';
+    });
+
+    // Déconnexion
+    document.getElementById('btn-logout').addEventListener('click', async () => {
+      await fetch('/api/logout', { method: 'POST' });
+      window.location.href = '/';
+    });
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const payload = {
@@ -290,7 +376,95 @@ app.get('/', (req, res) => {
     loadExpenses();
   </script>
 </body>
-</html>`);
+</html>`;
+}
+
+function loginPageHtml() {
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connexion — Voyage</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: linear-gradient(135deg, #d9f2e3 0%, #b7e6c9 100%);
+      color: #14532d;
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex; align-items: center; justify-content: center; padding: 24px 16px;
+    }
+    main {
+      width: 100%; max-width: 380px;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 20px; padding: 28px;
+      box-shadow: 0 10px 30px rgba(20, 83, 45, 0.15);
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 6px; text-align: center; }
+    .sub { text-align: center; opacity: 0.7; font-size: 0.9rem; margin-bottom: 20px; }
+    form { display: grid; gap: 12px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 0.8rem; opacity: 0.8; }
+    input {
+      padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 0.95rem; font-family: inherit;
+    }
+    button {
+      border: none; border-radius: 10px; padding: 11px 14px;
+      font-size: 0.95rem; cursor: pointer; font-weight: 600;
+      background: #16a34a; color: #fff;
+    }
+    button:hover { background: #15803d; }
+    .error { color: #b91c1c; font-size: 0.85rem; text-align: center; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>🔒 Connexion</h1>
+    <p class="sub">Suivi du voyage — heure & dépenses</p>
+    <form id="login-form">
+      <div class="field">
+        <label for="login-user">Nom d'utilisateur</label>
+        <input id="login-user" name="user" type="text" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="login-pass">Mot de passe</label>
+        <input id="login-pass" name="pass" type="password" autocomplete="current-password" required>
+      </div>
+      <p id="login-error" class="error hidden"></p>
+      <button type="submit">Se connecter</button>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById('login-form');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: form.user.value, password: form.pass.value }),
+      });
+      if (res.ok) {
+        window.location.href = '/';
+      } else {
+        const err = await res.json().catch(() => ({}));
+        const el = document.getElementById('login-error');
+        el.textContent = err.error || 'Erreur de connexion';
+        el.classList.remove('hidden');
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+app.get('/', (req, res) => {
+  if (!isAuthenticated(req)) {
+    return res.type('html').send(loginPageHtml());
+  }
+  res.type('html').send(mainPageHtml());
 });
 
 // — API heure ---------------------------------------------------------------
@@ -305,6 +479,29 @@ app.get('/api/time', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+// — API authentification -----------------------------------------------------
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body ?? {};
+  if (!safeEqual(username, AUTH_USER) || !safeEqual(password, AUTH_PASS)) {
+    return res.status(401).json({ error: 'Identifiants incorrects' });
+  }
+  const token = createSession(AUTH_USER);
+  setSessionCookie(res, token);
+  res.json({ username: AUTH_USER });
+});
+
+app.post('/api/logout', (req, res) => {
+  const token = getCookie(req, 'session');
+  if (token) sessions.delete(token);
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/status', (req, res) => {
+  const authenticated = isAuthenticated(req);
+  res.json({ authenticated, username: authenticated ? req.sessionUser : null });
 });
 
 // — API dépenses ------------------------------------------------------------
@@ -355,7 +552,27 @@ function parseExpense(body) {
   return { expense, errors };
 }
 
-app.get('/api/expenses', async (req, res, next) => {
+// — CSV ----------------------------------------------------------------------
+function csvField(value) {
+  const s = String(value ?? '');
+  return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function toCsv(expenses) {
+  const header = ['id', 'name', 'amount', 'currency', 'date', 'category', 'createdAt', 'updatedAt'];
+  const lines = [header.join(';')];
+  for (const e of expenses) {
+    lines.push(
+      [e.id, e.name, e.amount, e.currency, e.date, e.category, e.createdAt ?? '', e.updatedAt ?? '']
+        .map(csvField)
+        .join(';')
+    );
+  }
+  // BOM UTF-8 pour que Excel ouvre les accents correctement ; séparateur ';'
+  return '\uFEFF' + lines.join('\r\n');
+}
+
+app.get('/api/expenses', requireAuth, async (req, res, next) => {
   try {
     res.json(await store.getAll());
   } catch (err) {
@@ -363,7 +580,19 @@ app.get('/api/expenses', async (req, res, next) => {
   }
 });
 
-app.post('/api/expenses', async (req, res, next) => {
+// Export de toutes les dépenses en CSV
+app.get('/api/expenses/export.csv', requireAuth, async (req, res, next) => {
+  try {
+    const list = await store.getAll();
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="depenses.csv"');
+    res.send(toCsv(list));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/expenses', requireAuth, async (req, res, next) => {
   try {
     const { expense, errors } = parseExpense(req.body);
     if (errors.length > 0) {
@@ -377,7 +606,7 @@ app.post('/api/expenses', async (req, res, next) => {
 });
 
 // Modifier le nom d'une dépense — protégé par le code 1111
-app.put('/api/expenses/:id', async (req, res, next) => {
+app.put('/api/expenses/:id', requireAuth, async (req, res, next) => {
   try {
     if (req.body?.code !== EDIT_CODE) {
       return res.status(403).json({ error: 'Code incorrect' });
