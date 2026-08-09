@@ -1,0 +1,25 @@
+{
+  "name": "api-depenses",
+  "version": "1.0.0",
+  "description": "API pour enregistrer et suivre des dépenses mensuelles",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "api",
+    "expenses",
+    "budget",
+    "depenses"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
