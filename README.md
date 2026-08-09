@@ -29,6 +29,17 @@ Serveur sur `http://localhost:3000` (variable `PORT` pour changer).
 }
 ```
 
+## Déploiement sur Vercel
+
+Prêt pour Vercel : `api/index.js` exporte le handler HTTP comme fonction serverless et `vercel.json` redirige toutes les requêtes vers elle.
+
+```bash
+npm i -g vercel
+vercel
+```
+
+Ou connectez le dépôt GitHub dans le dashboard Vercel.
+
 ## Tests
 
 ```bash
