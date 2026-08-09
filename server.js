@@ -94,6 +94,52 @@ function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', 'session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
 }
 
+// — Anti force-brute sur la connexion ----------------------------------------
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+const loginAttempts = new Map(); // "ip|username" -> { count, lockedUntil }
+
+function loginKey(req) {
+  const ip = req.ip || req.socket?.remoteAddress || 'inconnu';
+  const username = String(req.body?.username ?? '');
+  return `${ip}|${username}`;
+}
+
+function purgeExpiredAttempts() {
+  const now = Date.now();
+  for (const [key, entry] of loginAttempts) {
+    if (entry.lockedUntil && entry.lockedUntil <= now) loginAttempts.delete(key);
+  }
+}
+
+// Renvoie le timestamp de fin de verrouillage, ou null si la connexion est autorisée.
+function checkLocked(req) {
+  const entry = loginAttempts.get(loginKey(req));
+  if (!entry || !entry.lockedUntil) return null;
+  if (entry.lockedUntil <= Date.now()) {
+    loginAttempts.delete(loginKey(req));
+    return null;
+  }
+  return entry.lockedUntil;
+}
+
+function recordFailure(req) {
+  purgeExpiredAttempts();
+  const key = loginKey(req);
+  const entry = loginAttempts.get(key) ?? { count: 0, lockedUntil: null };
+  entry.count += 1;
+  if (entry.count >= MAX_LOGIN_ATTEMPTS) {
+    entry.lockedUntil = Date.now() + LOCKOUT_MS;
+    entry.count = 0;
+  }
+  loginAttempts.set(key, entry);
+}
+
+function recordSuccess(req) {
+  loginAttempts.delete(loginKey(req));
+}
+
 const app = express();
 app.use(express.json());
 
@@ -721,14 +767,28 @@ app.get('/health', (req, res) => {
 // — API authentification -----------------------------------------------------
 app.post('/api/login', async (req, res, next) => {
   try {
+    // Anti force-brute : après MAX_LOGIN_ATTEMPTS échecs, verrouillage temporaire
+    const lockedUntil = checkLocked(req);
+    if (lockedUntil) {
+      const retryAfter = Math.ceil((lockedUntil - Date.now()) / 1000);
+      res.setHeader('Retry-After', String(retryAfter));
+      return res.status(429).json({
+        error: 'Trop de tentatives de connexion. Réessayez dans quelques minutes.',
+        retryAfter,
+      });
+    }
+
     const { username, password } = req.body ?? {};
     if (typeof username !== 'string' || typeof password !== 'string') {
+      recordFailure(req);
       return res.status(401).json({ error: 'Identifiants incorrects' });
     }
     const account = await authenticate(username, password);
     if (!account) {
+      recordFailure(req);
       return res.status(401).json({ error: 'Identifiants incorrects' });
     }
+    recordSuccess(req);
     const token = createSession(account.username, account.role);
     setSessionCookie(res, token);
     res.json({ username: account.username, role: account.role });
@@ -919,16 +979,16 @@ function toCsv(expenses) {
 
 app.get('/api/expenses', requireAuth, async (req, res, next) => {
   try {
-    res.json(await store.getAll());
+    res.json(await store.getAll(req.sessionUser));
   } catch (err) {
     next(err);
   }
 });
 
-// Export de toutes les dépenses en CSV
+// Export des dépenses de l'utilisateur connecté en CSV
 app.get('/api/expenses/export.csv', requireAuth, async (req, res, next) => {
   try {
-    const list = await store.getAll();
+    const list = await store.getAll(req.sessionUser);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="depenses.csv"');
     res.send(toCsv(list));
@@ -943,7 +1003,7 @@ app.post('/api/expenses', requireAuth, async (req, res, next) => {
     if (errors.length > 0) {
       return res.status(400).json({ errors });
     }
-    const created = await store.create(expense);
+    const created = await store.create(expense, req.sessionUser);
     res.status(201).json(created);
   } catch (err) {
     next(err);
@@ -959,7 +1019,7 @@ app.put('/api/expenses/:id', requireAuth, async (req, res, next) => {
     if (typeof req.body?.name !== 'string' || !req.body.name.trim()) {
       return res.status(400).json({ error: 'name : chaîne non vide requise' });
     }
-    const updated = await store.updateName(req.params.id, req.body.name.trim());
+    const updated = await store.updateName(req.params.id, req.body.name.trim(), req.sessionUser);
     if (!updated) {
       return res.status(404).json({ error: 'Dépense introuvable' });
     }

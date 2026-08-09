@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const ADMIN_USERNAME = 'Victor';
+export const ADMIN_USERNAME = 'Victor';
 const DEFAULT_ADMIN_PASSWORD = '2580';
 
 // Même logique de stockage que les dépenses (data/users.json en local,

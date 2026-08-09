@@ -91,6 +91,46 @@ test('login avec de mauvais identifiants → 401', async () => {
   assert.equal(status, 401);
 });
 
+test('anti force-brute : verrouillage après plusieurs échecs', async () => {
+  const username = 'bruteforce-user';
+  // 5 échecs successifs → 401 à chaque fois
+  for (let i = 0; i < 5; i++) {
+    const { status } = await loginAs(username, 'mauvais');
+    assert.equal(status, 401);
+  }
+  // 6e tentative (même avec un mot de passe quelconque) → 429 + délai
+  const blocked = await loginAs(username, 'peu-importe');
+  assert.equal(blocked.status, 429);
+  assert.ok(blocked.body.retryAfter > 0);
+});
+
+test('anti force-brute : un succès réinitialise le compteur', async () => {
+  const username = 'reset-user';
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+  const created = await apiFetch(
+    '/api/users',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: 'secret1' }),
+    },
+    victorCookie
+  );
+  assert.equal(created.status, 201);
+
+  // 2 échecs (sous le seuil de 5)
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await loginAs(username, 'mauvais')).status, 401);
+  }
+  // connexion réussie → le compteur repart de zéro
+  assert.equal((await loginAs(username, 'secret1')).status, 200);
+  // 3 nouveaux échecs ne suffisent pas à verrouiller (sinon on serait à 5)
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await loginAs(username, 'mauvais')).status, 401);
+  }
+  assert.equal((await loginAs(username, 'secret1')).status, 200);
+});
+
 test("GET / authentifié renvoie la page avec l'heure Casablanca + France et le bouton CSV", async () => {
   const res = await apiFetch('/');
   assert.equal(res.status, 200);
@@ -319,6 +359,47 @@ test('GET /api/expenses/export.csv renvoie toutes les données en CSV', async ()
   assert.match(csv, /^id;name;amount;currency;date;category;createdAt;updatedAt/m);
   assert.match(csv, /Resto;45\.5;MAD;2026-08-09;Alimentation/);
   assert.match(csv, /Taxi aéroport;100;EUR;2026-08-09;Transport/);
+});
+
+test("chaque utilisateur n'a accès qu'à ses propres dépenses", async () => {
+  const { cookie: victorCookie } = await loginAs('Victor', '2580');
+
+  // dépense créée par Victor
+  const v = await apiFetch(
+    '/api/expenses',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Dépense privée de Victor', amount: 10, currency: 'EUR', date: '2026-08-09', category: 'Autre' }),
+    },
+    victorCookie
+  );
+  assert.equal(v.status, 201);
+
+  // Victor la voit, l'autre utilisateur ne la voit pas
+  const victorList = await (await apiFetch('/api/expenses', {}, victorCookie)).json();
+  assert.ok(victorList.some((e) => e.name === 'Dépense privée de Victor'));
+  const adminList = await (await apiFetch('/api/expenses')).json();
+  assert.ok(!adminList.some((e) => e.name === 'Dépense privée de Victor'));
+
+  // Victor ne peut pas modifier une dépense de l'autre utilisateur (404)
+  const adminExpense = adminList.find((e) => e.name === 'Resto');
+  assert.ok(adminExpense);
+  const hijack = await apiFetch(
+    `/api/expenses/${adminExpense.id}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: '1111', name: 'Volé' }),
+    },
+    victorCookie
+  );
+  assert.equal(hijack.status, 404);
+
+  // l'export CSV de Victor ne contient que ses dépenses
+  const csv = await (await apiFetch('/api/expenses/export.csv', {}, victorCookie)).text();
+  assert.match(csv, /Dépense privée de Victor/);
+  assert.doesNotMatch(csv, /Resto/);
 });
 
 test('CSV export sans authentification → 401', async () => {

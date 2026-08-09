@@ -1,6 +1,6 @@
 # API Voyage — Heure & Dépenses ✈️
 
-Petite API Express pour un voyage : **heure de Casablanca + France** en direct et **enregistreur de dépenses** (devise au choix, catégories, modification protégée par code). L'accès est protégé par un **login / mot de passe**, avec **gestion des utilisateurs** (page admin) et **export CSV** des dépenses.
+Petite API Express pour un voyage : **heure de Casablanca + France** en direct et **enregistreur de dépenses** (devise au choix, catégories, modification protégée par code). L'accès est protégé par un **login / mot de passe**, avec **gestion des utilisateurs** (page admin) et **export CSV**. Chaque utilisateur a **sa propre liste de dépenses** (aucune dépense en commun).
 
 ## Démarrage
 
@@ -38,6 +38,14 @@ L'administrateur (Victor) voit le bouton **👥 Utilisateurs** sur la page princ
 
 Les utilisateurs sont stockés dans `data/users.json` (mots de passe **hachés** SHA-256 + sel, fichier ignoré par git). Garde-fous : impossible de supprimer son propre compte ni de retirer le rôle admin du **dernier** administrateur.
 
+### Dépenses par utilisateur 💰
+
+Chaque dépense est liée à son créateur (`owner`) : un utilisateur ne voit, ne modifie et n'exporte en CSV **que ses propres dépenses** — les listes ne sont jamais partagées. Les dépenses créées avant cette séparation sont automatiquement attribuées à l'administrateur (Victor) au premier chargement.
+
+### Anti force-brute 🔐
+
+Après **5 échecs** de connexion consécutifs (par adresse IP + nom d'utilisateur), la connexion est **verrouillée 15 minutes** : les tentatives suivantes reçoivent un `429 Too Many Requests` avec l'en-tête `Retry-After`. Une connexion réussie réinitialise le compteur.
+
 La session (cookie `HttpOnly`, `SameSite=Lax`) dure **7 jours**. Les sessions sont stockées en mémoire (perdues au redémarrage — il faudra se reconnecter).
 
 ## Page principale
@@ -59,10 +67,10 @@ La session (cookie `HttpOnly`, `SameSite=Lax`) dure **7 jours**. Les sessions so
 | `PUT`   | `/api/users/:username`       | Changer mot de passe / rôle (admin)               |
 | `DELETE`| `/api/users/:username`       | Supprimer un utilisateur (admin)                  |
 | `GET`   | `/api/time`                  | Heures Casablanca + France (JSON)                 |
-| `GET`   | `/api/expenses`              | Lister les dépenses (tri par date décroissante)   |
+| `GET`   | `/api/expenses`              | Lister **mes** dépenses (tri par date décroissante) |
 | `POST`  | `/api/expenses`              | Créer une dépense                                 |
 | `PUT`   | `/api/expenses/:id`          | Modifier le **nom** (code `1111` requis)          |
-| `GET`   | `/api/expenses/export.csv`   | **Toutes** les dépenses en CSV (téléchargement)   |
+| `GET`   | `/api/expenses/export.csv`   | **Mes** dépenses en CSV (téléchargement)          |
 | `GET`   | `/health`                    | Healthcheck                                       |
 
 > Routes `⚠️ /api/expenses*` et `⚠️ /api/users*` : authentification requise ; `/api/users*` et `/admin` sont réservés à l'**administrateur** (sinon `401`/`403`).
@@ -78,7 +86,7 @@ curl -X POST http://localhost:3000/api/login \
 
 ## Export CSV ⬇️
 
-Le bouton **Exporter CSV** de la page (ou `GET /api/expenses/export.csv`) télécharge `depenses.csv` avec **toutes** les dépenses enregistrées.
+Le bouton **Exporter CSV** de la page (ou `GET /api/expenses/export.csv`) télécharge `depenses.csv` avec **toutes les dépenses de l'utilisateur connecté**.
 
 - Séparateur `;` et **BOM UTF-8** → s'ouvre directement dans Excel (accents corrects).
 - Colonnes : `id; name; amount; currency; date; category; createdAt; updatedAt`.

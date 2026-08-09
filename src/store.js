@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ADMIN_USERNAME } from './users.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -22,6 +23,16 @@ async function load() {
     if (!Array.isArray(parsed.expenses)) {
       throw new Error('Format du fichier de données invalide');
     }
+    // Migration : les dépenses créées avant la séparation par utilisateur
+    // sont attribuées au compte administrateur (Victor).
+    let migrated = false;
+    for (const e of parsed.expenses) {
+      if (!e.owner) {
+        e.owner = ADMIN_USERNAME;
+        migrated = true;
+      }
+    }
+    if (migrated) await save(parsed);
     return parsed;
   } catch (err) {
     if (err.code === 'ENOENT') {
@@ -37,16 +48,20 @@ async function save(data) {
   await writeFile(file, JSON.stringify(data, null, 2), 'utf8');
 }
 
-export async function getAll() {
+// Chaque utilisateur ne voit que ses propres dépenses (champ owner).
+export async function getAll(owner) {
   const data = await load();
-  return [...data.expenses].sort((a, b) => b.date.localeCompare(a.date));
+  return data.expenses
+    .filter((e) => e.owner === owner)
+    .sort((a, b) => b.date.localeCompare(a.date));
 }
 
-export async function create(expense) {
+export async function create(expense, owner) {
   const data = await load();
   const item = {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
+    owner,
     ...expense,
   };
   data.expenses.push(item);
@@ -54,9 +69,9 @@ export async function create(expense) {
   return item;
 }
 
-export async function updateName(id, name) {
+export async function updateName(id, name, owner) {
   const data = await load();
-  const expense = data.expenses.find((e) => e.id === id);
+  const expense = data.expenses.find((e) => e.id === id && e.owner === owner);
   if (!expense) return null;
   expense.name = name;
   expense.updatedAt = new Date().toISOString();
